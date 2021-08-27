@@ -32,7 +32,7 @@ DELETE_FILE_WHEN_PROCESSED="0"
 DELETE_TMP_FILES_WHEN_SENT="1"
 FILE_WATCH_PATTERN="*.mp4"
 SLEEP_CYCLE_SECONDS="60"
-SEND_TELEGRAM_NOTIFICATIONS="1"
+SEND_TELEGRAM_NOTIFICATIONS="0"
 #
 # Consts: CFS
 ## This is used to make the notification message silent if anyone is home while the camera caught motion.
@@ -75,102 +75,98 @@ LOG_MAX_LINES="10000"
 checkFiles ()
 {
 	# Search for new files.
-	L_FILE_LIST="$(find "${FOLDER_TO_WATCH}" -mindepth ${FOLDER_MINDEPTH} -type f \( -name "${FILE_WATCH_PATTERN}" \) -print | sort -k 1 -n)"
+	L_FILE_LIST="$(find "${FOLDER_TO_WATCH}" -mindepth ${FOLDER_MINDEPTH} -type f \( -name "${FILE_WATCH_PATTERN}" ! -name "*processed*" \) -print | sort -k 1 -n)"
 	if [ -z "${L_FILE_LIST}" ]; then
-	    logAdd "no files to process, exiting"
+	    logAdd "[INFO] checkFiles: No files to process, exiting..."
 		return 0
 	fi
 	echo "${L_FILE_LIST}" | while read file; do
-	    logAdd ""
-	    logAdd ""
-	    logAdd "----------------------"
-	    logAdd "now processing ${file}"
-	    logAdd "----------------------"
 		# Only process files that have not been processed by dvrscan before.
-		if ( ! echo "${file}" | grep -q "_processed.mp4$" ); then
-			#if [ ! -s "${file}" ]; then
-				#echo "[INFO] checkFiles: Skipping empty file [${file}]"
-				#rm -f "${file}"
-				#continue
-			#fi
-			#
-			if [ "${MAX_VIDEO_LENGTH_SECONDS}" -gt "0" ]; then
-				 VIDEO_LENGTH_NS="$(mediainfo --Inform="Video;%Duration%" "${file}")"
-				 VIDEO_LENGTH_SECONDS="$((VIDEO_LENGTH_NS/100000000))"
-				 if [ "${VIDEO_LENGTH_SECONDS}" -gt "${MAX_VIDEO_LENGTH_SECONDS}" ]; then
-					logAdd "[INFO] checkFiles: mediainfo reported [${VIDEO_LENGTH_SECONDS}s] over limit [${MAX_VIDEO_LENGTH_SECONDS}s] - [${file}]. Deleting and skipping."
-					rm -f "${file}"
-					continue
-				 fi
-			fi
-			#
-			dvr_scan_output=$("${DVRSCAN_PYTHON}" "${DVRSCAN_SCRIPT}" -i "${file}" -so -l "${DVRSCAN_EXTRACT_MOTION_MIN_EVENT_LENGTH}" ${DVRSCAN_EXTRACT_MOTION_ROI} -t "${DVRSCAN_EXTRACT_MOTION_THRESHOLD}" -tb "${DVRSCAN_EXTRACT_BEFORE}" -tp "${DVRSCAN_EXTRACT_AFTER}")
-			if ( ! echo "$dvr_scan_output" | grep "] Detected" ); then
-				logAdd "[INFO] checkFiles: dvr-scan reported no motion - [${file}]. Skipping."
-				continue
-			else
-				# 00:00:00.650,00:00:01.900,00:00:05.650,00:00:09.900
-				timestamps="${dvr_scan_output##*$'\n'}"
-				# split on comma
-				timestamps_arr=(${timestamps//\,/ })
-				#IFS=',' read -r -a timestamps_arr <<< "$timestamps"
-				
-				#echo "x"
-				#echo "$timestamps"
-				#echo "y"
+		logAdd ""
+		logAdd ""
+		logAdd "----------------------"
+		logAdd "[INFO] checkFiles: now processing ${file}"
+		logAdd "----------------------"
+		#if [ ! -s "${file}" ]; then
+			#echo "[INFO] checkFiles: Skipping empty file [${file}]"
+			#rm -f "${file}"
+			#continue
+		#fi
 
-				arraylength=${#timestamps_arr[@]}
-				#echo "timestamps_arr"
-				#echo "${timestamps_arr[*]}"
-				#echo "arraylength"
-				#echo "$arraylength"
-				# loop every two values
-				ffmpeg_splits=()
-				TMP_FFMPEG_SPLIT_BASE="/tmp/ffmpeg_motion_"
-				for (( i=0; i<${arraylength}; i+=2 ));
-				do
-					TMP_FFMPEG_SPLIT="${TMP_FFMPEG_SPLIT_BASE}${i}.mp4"
-					TMP_FFMPEG_FINAL="${TMP_FFMPEG_SPLIT_BASE}${i}.mp4"
-					#from="${timestamps[$i]}"
-					#to="${timestamps[$i+1]}"
-					from="${timestamps_arr[$i]}"
-					to="${timestamps_arr[$i+1]}"
-					#echo "from"
-					#echo "$from"
-					#echo "to"
-					#echo "$to"
-					ffmpeg -y -nostdin -ss "${from}" -to "${to}" -i "${file}" -c copy "${TMP_FFMPEG_SPLIT}"
-					if [ -f "$TMP_FFMPEG_SPLIT" ]; then
-						ffmpeg_splits+=($TMP_FFMPEG_SPLIT)
-					fi
-			    done
-				if [ "${#ffmpeg_splits[@]}" -gt "1" ]; then
-					echo "ffmpeg_splits"
-					#echo "${ffmpeg_splits[*]}"
-					printf "%s\n" "${ffmpeg_splits[@]}"
-					TMP_FFMPEG_FINAL="${TMP_FFMPEG_SPLIT_BASE}final.mp4"
-					ffmpeg -y -nostdin -f concat -safe 0 -i <(for f in "${ffmpeg_splits[@]}"; do echo "file '$f'"; done) -c copy $TMP_FFMPEG_FINAL
+		VIDEO_LENGTH_MS="$(mediainfo --Inform="General;%Duration%" "${file}")"
+		VIDEO_LENGTH_SECONDS="$((VIDEO_LENGTH_MS/1000))"
+		logAdd "[INFO] checkFiles: video length is ${VIDEO_LENGTH_SECONDS}s (${VIDEO_LENGTH_MS}ms)."
+
+		dvr_scan_output=$("${DVRSCAN_PYTHON}" "${DVRSCAN_SCRIPT}" -i "${file}" -so -l "${DVRSCAN_EXTRACT_MOTION_MIN_EVENT_LENGTH}" ${DVRSCAN_EXTRACT_MOTION_ROI} -t "${DVRSCAN_EXTRACT_MOTION_THRESHOLD}" -tb "${DVRSCAN_EXTRACT_BEFORE}" -tp "${DVRSCAN_EXTRACT_AFTER}")
+		if ( ! echo "$dvr_scan_output" | grep "] Detected" ); then
+			logAdd "[INFO] checkFiles: dvr-scan reported no motion - [${file}]. Skipping."
+			continue
+		else
+			# 00:00:00.650,00:00:01.900,00:00:05.650,00:00:09.900
+			timestamps="${dvr_scan_output##*$'\n'}"
+			# split on comma
+			timestamps_arr=(${timestamps//\,/ })
+			#IFS=',' read -r -a timestamps_arr <<< "$timestamps"
+			
+			#echo "x"
+			#echo "$timestamps"
+			#echo "y"
+
+			arraylength=${#timestamps_arr[@]}
+			#echo "timestamps_arr"
+			#echo "${timestamps_arr[*]}"
+			#echo "arraylength"
+			#echo "$arraylength"
+			# loop every two values
+			ffmpeg_splits=()
+			TMP_FFMPEG_SPLIT_BASE="/tmp/ffmpeg_motion_"
+			for (( i=0; i<${arraylength}; i+=2 ));
+			do
+				TMP_FFMPEG_SPLIT="${TMP_FFMPEG_SPLIT_BASE}${i}.mp4"
+				TMP_FFMPEG_FINAL="${TMP_FFMPEG_SPLIT_BASE}${i}.mp4"
+				#from="${timestamps[$i]}"
+				#to="${timestamps[$i+1]}"
+				from="${timestamps_arr[$i]}"
+				to="${timestamps_arr[$i+1]}"
+				logAdd "Splitting video from ${from} to ${to}"
+				#echo "from"
+				#echo "$from"
+				#echo "to"
+				#echo "$to"
+				ffmpeg -y -nostdin -ss "${from}" -to "${to}" -i "${file}" -c copy "${TMP_FFMPEG_SPLIT}"
+				if [ -f "$TMP_FFMPEG_SPLIT" ]; then
+					ffmpeg_splits+=($TMP_FFMPEG_SPLIT)
 				fi
+			done
+			if [ "${#ffmpeg_splits[@]}" -gt "1" ]; then
+				echo "ffmpeg_splits"
+				#echo "${ffmpeg_splits[*]}"
+				printf "%s\n" "${ffmpeg_splits[@]}"
+				TMP_FFMPEG_FINAL="${TMP_FFMPEG_SPLIT_BASE}final.mp4"
+				ffmpeg -y -nostdin -f concat -safe 0 -i <(for f in "${ffmpeg_splits[@]}"; do echo "file '$f'"; done) -c copy $TMP_FFMPEG_FINAL
 			fi
-			if [ "${SEND_TELEGRAM_NOTIFICATIONS}" = "1" ]; then
-				if ( sendTelegramNotification -- "${TMP_FFMPEG_FINAL}" ); then
-					logAdd "[INFO] checkFiles: sendTelegramNotification SUCCEEDED - [${TMP_FFMPEG_FINAL}]."
-				else
-					logAdd "[ERROR] checkFiles: sendTelegramNotification FAILED - [${TMP_FFMPEG_FINAL}]."
-				fi
-			else
-				logAdd "[INFO] checkFiles: SKIPPING sendTelegramNotification."
-			fi
-			if [ "${DELETE_FILE_WHEN_PROCESSED}" = "1" ]; then
-				rm -f "${file}"
-			fi
-			if [ "${DELETE_TMP_FILES_WHEN_SENT}" = "1" ]; then
-				rm "${TMP_FFMPEG_SPLIT_BASE}"*
-			fi
-			logAdd "----------------------"
-			logAdd "finished processing ${file}"
-			logAdd "----------------------"
 		fi
+		if [ "${SEND_TELEGRAM_NOTIFICATIONS}" = "1" ]; then
+			if ( sendTelegramNotification -- "${TMP_FFMPEG_FINAL}" ); then
+				logAdd "[INFO] checkFiles: sendTelegramNotification SUCCEEDED - [${TMP_FFMPEG_FINAL}]."
+			else
+				logAdd "[ERROR] checkFiles: sendTelegramNotification FAILED - [${TMP_FFMPEG_FINAL}]."
+			fi
+		else
+			logAdd "[INFO] checkFiles: SKIPPING sendTelegramNotification."
+		fi
+		if [ "${DELETE_FILE_WHEN_PROCESSED}" = "1" ]; then
+			rm -f "${file}"
+		else
+			processed_file="$(echo "${file}" | sed -e "s/.mp4$/_processed.mp4/")"
+			mv "${file}" "${processed_file}"
+		fi
+		if [ "${DELETE_TMP_FILES_WHEN_SENT}" = "1" ]; then
+			rm "${TMP_FFMPEG_SPLIT_BASE}"*
+		fi
+		logAdd "----------------------"
+		logAdd "finished processing ${file}"
+		logAdd "----------------------"
 	done
 	#
 	# Delete empty sub directories
