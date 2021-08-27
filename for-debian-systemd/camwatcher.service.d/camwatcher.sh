@@ -18,20 +18,21 @@
 # 	apt-get install -y mediainfo
 # 	Env vars: Set by camera01.env file
 # 		FOLDER_TO_WATCH
-# 		INCIDENT_SEND_VIDEO_TO_CHAT
+# 		SEND_TELEGRAM_NOTIFICATIONS
 # 		DVRSCAN_EXTRACT_MOTION_ROI
-# 		STN_TELEGRAM_BOT_APIKEY
-# 		STN_TELEGRAM_BOT_ID
-# 		STN_TELEGRAM_CHAT_ID
-# 	Get STN_TELEGRAM_CHAT_ID
-# 		curl -s "https://api.telegram.org/bot${STN_TELEGRAM_BOT_ID}:${STN_TELEGRAM_BOT_APIKEY}/getUpdates" | grep -o -E '"chat":{"id":[-0-9]*,' | head -n 1
+# 		TELEGRAM_BOT_APIKEY
+# 		TELEGRAM_BOT_ID
+# 		TELEGRAM_CHAT_ID
+# 	Get TELEGRAM_CHAT_ID:
+# 		curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_ID}:${TELEGRAM_BOT_APIKEY}/getUpdates" | grep -o -E '"chat":{"id":[-0-9]*,' | head -n 1
 #
 # Script Configuration.
 FOLDER_MINDEPTH="1"
-FILE_DELETE_AFTER_PROCESSING="1"
+DELETE_FILE_WHEN_PROCESSED="0"
+DELETE_TMP_FILES_WHEN_SENT="1"
 FILE_WATCH_PATTERN="*.mp4"
-SKIP_SENDING_PUSH_MESSAGES="0"
 SLEEP_CYCLE_SECONDS="60"
+SEND_TELEGRAM_NOTIFICATIONS="1"
 #
 # Consts: CFS
 ## This is used to make the notification message silent if anyone is home while the camera caught motion.
@@ -41,25 +42,20 @@ G_DP_PRESENCE_ANYONE="/tmp/cfs/dp/presence/anyone"
 ### Check incoming videos if they really contain motion.
 ### Delete them if no motion is found.
 ### ROI x,y,w,h derived from VLC snapshot analyzed in ImageGlass
-DVRSCAN_MOTION_ANALYSIS="1"
 DVRSCAN_PYTHON="/usr/bin/python3"
-DVRSCAN_SCRIPT="/usr/local/bin/dvr-scan"
-DVRSCAN_EXTRACT_FORMAT="H264"
-DVRSCAN_EXTRACT_MOTION="1"
+DVRSCAN_SCRIPT="/home/koichirose/.local/bin/dvr-scan"
+#DVRSCAN_EXTRACT_FORMAT="H264"
+#DVRSCAN_EXTRACT_FORMAT="MP4V"
 DVRSCAN_EXTRACT_MOTION_MIN_EVENT_LENGTH="4"				# default: 2
 #
-DVRSCAN_EXTRACT_MOTION_THRESHOLD="0.4"					# default: 0.15
+DVRSCAN_EXTRACT_MOTION_THRESHOLD="0.4"					# default: 0.4
+#DVRSCAN_EXTRACT_MOTION_THRESHOLD="0.15"					# default: 0.15
 DVRSCAN_EXTRACT_BEFORE="00:00:01.0000"
 DVRSCAN_EXTRACT_AFTER="00:00:03.0000"
 ###
 ### For testing purposes only.
-#### /usr/local/bin/dvr-scan -i "/tmp/test1.mp4" -o "/tmp/ouput.mp4" -c "H264" -l 4 -roi 339 488 333 591 339 1044 1052 35 -t "0.4" -tb "00:00:03.0000" -tp "00:00:03.0000"
+#### bash "/home/koichirose/scripts/camwatcher/for-debian-systemd/camwatcher.service.d/camwatcher.sh" cron camera01
 ##
-### Use ffmpeg to extract jpg series from videos.
-FFMPEG_EXTRACT_JPG="1"
-FFMPEG_EXTRACT_JPG_SIZE="640x360"
-FFMPEG_EXTRACT_DURATION="10"
-FFMPEG_EXTRACT_RATE="1"
 ##
 ### Check if incoming videos are longer than X seconds.
 ### Useful for example when Yi Cameras always submit a 59 second video subsequently after
@@ -78,27 +74,25 @@ LOG_MAX_LINES="10000"
 # -----------------------------------------------------
 checkFiles ()
 {
-	#
 	# Search for new files.
-	if [ -f "/usr/bin/sort" ]; then
-		# Default: Optimized for busybox, debian
-		L_FILE_LIST="$(find "${FOLDER_TO_WATCH}" -mindepth ${FOLDER_MINDEPTH} -type f \( -name "${FILE_WATCH_PATTERN}" \) | sort -k 1 -n)"
-	else
-		# Alternative: Unsorted output
-		L_FILE_LIST="$(find "${FOLDER_TO_WATCH}" -mindepth ${FOLDER_MINDEPTH} -type f \( -name "${FILE_WATCH_PATTERN}" \))"
-	fi
+	L_FILE_LIST="$(find "${FOLDER_TO_WATCH}" -mindepth ${FOLDER_MINDEPTH} -type f \( -name "${FILE_WATCH_PATTERN}" \) -print | sort -k 1 -n)"
 	if [ -z "${L_FILE_LIST}" ]; then
+	    logAdd "no files to process, exiting"
 		return 0
 	fi
-	#
 	echo "${L_FILE_LIST}" | while read file; do
+	    logAdd ""
+	    logAdd ""
+	    logAdd "----------------------"
+	    logAdd "now processing ${file}"
+	    logAdd "----------------------"
 		# Only process files that have not been processed by dvrscan before.
 		if ( ! echo "${file}" | grep -q "_processed.mp4$" ); then
-			if [ ! -s "${file}" ]; then
-				echo "[INFO] checkFiles: Skipping empty file [${file}]"
-				rm -f "${file}"
-				continue
-			fi
+			#if [ ! -s "${file}" ]; then
+				#echo "[INFO] checkFiles: Skipping empty file [${file}]"
+				#rm -f "${file}"
+				#continue
+			#fi
 			#
 			if [ "${MAX_VIDEO_LENGTH_SECONDS}" -gt "0" ]; then
 				 VIDEO_LENGTH_NS="$(mediainfo --Inform="Video;%Duration%" "${file}")"
@@ -110,67 +104,73 @@ checkFiles ()
 				 fi
 			fi
 			#
-			if [ "${DVRSCAN_MOTION_ANALYSIS}" = "1" ]; then
-				TMP_MOTION_VIDEO="/tmp/dvr-scan-motion_${LOG_SUFFIX}.mp4"
-				if ( ! "${DVRSCAN_PYTHON}" "${DVRSCAN_SCRIPT}" -i "${file}" -o "${TMP_MOTION_VIDEO}" -c "${DVRSCAN_EXTRACT_FORMAT}" -l "${DVRSCAN_EXTRACT_MOTION_MIN_EVENT_LENGTH}" ${DVRSCAN_EXTRACT_MOTION_ROI} -t "${DVRSCAN_EXTRACT_MOTION_THRESHOLD}" -tb "${DVRSCAN_EXTRACT_BEFORE}" -tp "${DVRSCAN_EXTRACT_AFTER}" | grep "] Detected" ); then
-					logAdd "[INFO] checkFiles: dvr-scan reported no motion - [${file}]. Deleting and skipping."
-					if [ "${FILE_DELETE_AFTER_PROCESSING}" = "1" ]; then
-						rm -f "${file}"
-					fi
-					continue
-				fi
-				#
-				if [ "${DVRSCAN_EXTRACT_MOTION}" = "1" ]; then
-					rm -f "${file}"
-					file="$(echo "${file}" | sed -e "s/.mp4$/_processed.mp4/")"
-					if ( ! mv "${TMP_MOTION_VIDEO}" "${file}" ); then
-						logAdd "[ERROR] checkFiles: mv out of free disk space. Deleting and skipping."
-						continue
-					fi
-				fi
-			fi
-		fi
-		#
-		#
-		if [ "${INCIDENT_SEND_VIDEO_TO_CHAT}" = "1" ]; then
-			if ( ! sendTelegramNotification -- "${file}" ); then
-				logAdd "[ERROR] checkFiles: sendTelegramNotification FAILED - [${file}]."
+			dvr_scan_output=$("${DVRSCAN_PYTHON}" "${DVRSCAN_SCRIPT}" -i "${file}" -so -l "${DVRSCAN_EXTRACT_MOTION_MIN_EVENT_LENGTH}" ${DVRSCAN_EXTRACT_MOTION_ROI} -t "${DVRSCAN_EXTRACT_MOTION_THRESHOLD}" -tb "${DVRSCAN_EXTRACT_BEFORE}" -tp "${DVRSCAN_EXTRACT_AFTER}")
+			if ( ! echo "$dvr_scan_output" | grep "] Detected" ); then
+				logAdd "[INFO] checkFiles: dvr-scan reported no motion - [${file}]. Skipping."
 				continue
-			fi
-		fi
-		logAdd "[INFO] checkFiles: sendTelegramNotification SUCCEEDED - [${file}]."
-		#
-		if [ "${FFMPEG_EXTRACT_JPG}" = "1" ]; then
-			MOTION_SNAPSHOT_DIR="/tmp/motion_snapshot_${LOG_SUFFIX}"
-			mkdir -p "${MOTION_SNAPSHOT_DIR}"
-			if ( ffmpeg -nostdin -loglevel error -i "${file}" -t "${FFMPEG_EXTRACT_DURATION}" -s "${FFMPEG_EXTRACT_JPG_SIZE}" -r "${FFMPEG_EXTRACT_RATE}" "${MOTION_SNAPSHOT_DIR}/snapshot_%04d.jpg" ); then
-				if [ -f "${MOTION_SNAPSHOT_DIR}/snapshot_0002.jpg" ] && [ -f "${MOTION_SNAPSHOT_DIR}/snapshot_0003.jpg" ]; then
-					logAdd "[INFO] checkFiles: Uploading JPG snapshots ..."
-					INCIDENT_TIMESTAMP="$(echo "${file%%.mp4}" | sed -e "s~${FOLDER_TO_WATCH}/~~" -e "s/[YMDH]/-/g" -e "s/H//" -e "s~/~~" -e "s/_processed//" | sed -E "s/S[0-9]{2}//" | sed -e 's/^\(.\{10\}\)./\1_/')"
-					# sendTelegramMediaGroup "${INCIDENT_TIMESTAMP}" "${MOTION_SNAPSHOT_DIR}/snapshot_0002.jpg" "${MOTION_SNAPSHOT_DIR}/snapshot_0003.jpg"
-					if ( ! sendTelegramMediaGroup "${INCIDENT_TIMESTAMP}" "${MOTION_SNAPSHOT_DIR}/snapshot_0004.jpg" ); then
-						logAdd "[ERROR] checkFiles: sendTelegramMediaGroup jpg snapshot FAILED."
+			else
+				# 00:00:00.650,00:00:01.900,00:00:05.650,00:00:09.900
+				timestamps="${dvr_scan_output##*$'\n'}"
+				# split on comma
+				timestamps_arr=(${timestamps//\,/ })
+				#IFS=',' read -r -a timestamps_arr <<< "$timestamps"
+				
+				#echo "x"
+				#echo "$timestamps"
+				#echo "y"
+
+				arraylength=${#timestamps_arr[@]}
+				#echo "timestamps_arr"
+				#echo "${timestamps_arr[*]}"
+				#echo "arraylength"
+				#echo "$arraylength"
+				# loop every two values
+				ffmpeg_splits=()
+				TMP_FFMPEG_SPLIT_BASE="/tmp/ffmpeg_motion_"
+				for (( i=0; i<${arraylength}; i+=2 ));
+				do
+					TMP_FFMPEG_SPLIT="${TMP_FFMPEG_SPLIT_BASE}${i}.mp4"
+					TMP_FFMPEG_FINAL="${TMP_FFMPEG_SPLIT_BASE}${i}.mp4"
+					#from="${timestamps[$i]}"
+					#to="${timestamps[$i+1]}"
+					from="${timestamps_arr[$i]}"
+					to="${timestamps_arr[$i+1]}"
+					#echo "from"
+					#echo "$from"
+					#echo "to"
+					#echo "$to"
+					ffmpeg -y -nostdin -ss "${from}" -to "${to}" -i "${file}" -c copy "${TMP_FFMPEG_SPLIT}"
+					if [ -f "$TMP_FFMPEG_SPLIT" ]; then
+						ffmpeg_splits+=($TMP_FFMPEG_SPLIT)
 					fi
+			    done
+				if [ "${#ffmpeg_splits[@]}" -gt "1" ]; then
+					echo "ffmpeg_splits"
+					#echo "${ffmpeg_splits[*]}"
+					printf "%s\n" "${ffmpeg_splits[@]}"
+					TMP_FFMPEG_FINAL="${TMP_FFMPEG_SPLIT_BASE}final.mp4"
+					ffmpeg -y -nostdin -f concat -safe 0 -i <(for f in "${ffmpeg_splits[@]}"; do echo "file '$f'"; done) -c copy $TMP_FFMPEG_FINAL
 				fi
-				#
-				# Alternative
-				#for JPG_SNAPSHOT in ${MOTION_SNAPSHOT_DIR}/snapshot_*.jpg ; do
-				#	if [ -f "${JPG_SNAPSHOT}" ]; then
-				#		if ( ! sendTelegramNotification -- "${JPG_SNAPSHOT}" ); then
-				#			logAdd "[ERROR] checkFiles: sendTelegramNotification FAILED - [${JPG_SNAPSHOT}]."
-				#		fi
-				#	fi
-				#done
 			fi
-			if [ "${FILE_DELETE_AFTER_PROCESSING}" = "1" ] && [ ! -z "${MOTION_SNAPSHOT_DIR}" ]; then
-				rm -rf "${MOTION_SNAPSHOT_DIR}"
+			if [ "${SEND_TELEGRAM_NOTIFICATIONS}" = "1" ]; then
+				if ( sendTelegramNotification -- "${TMP_FFMPEG_FINAL}" ); then
+					logAdd "[INFO] checkFiles: sendTelegramNotification SUCCEEDED - [${TMP_FFMPEG_FINAL}]."
+				else
+					logAdd "[ERROR] checkFiles: sendTelegramNotification FAILED - [${TMP_FFMPEG_FINAL}]."
+				fi
+			else
+				logAdd "[INFO] checkFiles: SKIPPING sendTelegramNotification."
 			fi
+			if [ "${DELETE_FILE_WHEN_PROCESSED}" = "1" ]; then
+				rm -f "${file}"
+			fi
+			if [ "${DELETE_TMP_FILES_WHEN_SENT}" = "1" ]; then
+				rm "${TMP_FFMPEG_SPLIT_BASE}"*
+			fi
+			logAdd "----------------------"
+			logAdd "finished processing ${file}"
+			logAdd "----------------------"
 		fi
-		#
-		if [ "${FILE_DELETE_AFTER_PROCESSING}" = "1" ]; then
-			rm -f "${file}"
-		fi
-		#
 	done
 	#
 	# Delete empty sub directories
@@ -202,9 +202,9 @@ sendTelegramMediaGroup ()
 	# 	Send push message to Telegram Bot Chat
 	#
 	# Global Variables
-	# 	[IN] STN_TELEGRAM_BOT_ID
-	# 	[IN] STN_TELEGRAM_BOT_APIKEY
-	# 	[IN] STN_TELEGRAM_CHAT_ID
+	# 	[IN] TELEGRAM_BOT_ID
+	# 	[IN] TELEGRAM_BOT_APIKEY
+	# 	[IN] TELEGRAM_CHAT_ID
 	#
 	# Returns:
 	# 	"0" on SUCCESS
@@ -212,10 +212,6 @@ sendTelegramMediaGroup ()
 	#
 	# Variables.
 	TMP_TEXT_CAPTION="${1}"
-	if [ "${SKIP_SENDING_PUSH_MESSAGES}" = "1" ]; then
-		logAdd "[INFO] sendTelegramMediaGroup skipped due to SKIP_SENDING_PUSH_MESSAGES == 1."
-		return 1
-	fi
 	#
 	# Add first attachment.
 	STN_ATT1_FULLFN="${2}"
@@ -240,7 +236,7 @@ sendTelegramMediaGroup ()
 			--max-time \""60\"" \
 			-F "media='[${TMP_MEDIA_ARRAY}]'" \
 			${TMP_ATTACHMENT_ARRAY} \
-			 "\"https://api.telegram.org/bot${STN_TELEGRAM_BOT_ID}:${STN_TELEGRAM_BOT_APIKEY}/sendMediaGroup?chat_id=${STN_TELEGRAM_CHAT_ID}&disable_notification=true\"" \
+			 "\"https://api.telegram.org/bot${TELEGRAM_BOT_ID}:${TELEGRAM_BOT_APIKEY}/sendMediaGroup?chat_id=${TELEGRAM_CHAT_ID}&disable_notification=true\"" \
 			 2> /dev/null)"
 	if ( ! echo "${CURL_RESULT}" | grep -Fiq "\"ok\":true" ); then
 		if ( echo "${CURL_RESULT}" | grep -Fiq "\"error_code\":413," ); then
@@ -273,9 +269,9 @@ sendTelegramNotification ()
 	# 	"1" on FAILURE
 	#
 	# Global Variables
-	# 	[IN] STN_TELEGRAM_BOT_ID
-	# 	[IN] STN_TELEGRAM_BOT_APIKEY
-	# 	[IN] STN_TELEGRAM_CHAT_ID
+	# 	[IN] TELEGRAM_BOT_ID
+	# 	[IN] TELEGRAM_BOT_APIKEY
+	# 	[IN] TELEGRAM_CHAT_ID
 	#
 	# Variables.
 	STN_TEXT="${1}"
@@ -289,10 +285,6 @@ sendTelegramNotification ()
 		return 1
 	fi
 	#
-	if [ "${SKIP_SENDING_PUSH_MESSAGES}" = "1" ]; then
-		logAdd "[INFO] sendTelegramNotification skipped due to SKIP_SENDING_PUSH_MESSAGES == 1."
-		return 1
-	fi
 	#
 	# If anyone is home, plan a silent notification.
 	STN_DISABLE_NOTIFICATION="false"
@@ -304,7 +296,7 @@ sendTelegramNotification ()
 		if ( ! eval curl -q \
 				--insecure \
 				--max-time \""60\"" \
-				 "\"https://api.telegram.org/bot${STN_TELEGRAM_BOT_ID}:${STN_TELEGRAM_BOT_APIKEY}/sendMessage?chat_id=${STN_TELEGRAM_CHAT_ID}&disable_notification=${STN_DISABLE_NOTIFICATION}&text=${STN_TEXT}\"" \
+				 "\"https://api.telegram.org/bot${TELEGRAM_BOT_ID}:${TELEGRAM_BOT_APIKEY}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&disable_notification=${STN_DISABLE_NOTIFICATION}&text=${STN_TEXT}\"" \
 				 2> /dev/null \| grep -Fiq "\"ok\\\":true\"" ); then
 			return 1
 		fi
@@ -316,7 +308,7 @@ sendTelegramNotification ()
 					--insecure \
 					--max-time \""60\"" \
 					-F "\"photo=@${STN_ATT_FULLFN}\"" \
-					 "\"https://api.telegram.org/bot${STN_TELEGRAM_BOT_ID}:${STN_TELEGRAM_BOT_APIKEY}/sendPhoto?chat_id=${STN_TELEGRAM_CHAT_ID}&disable_notification=${STN_DISABLE_NOTIFICATION}\"" \
+					 "\"https://api.telegram.org/bot${TELEGRAM_BOT_ID}:${TELEGRAM_BOT_APIKEY}/sendPhoto?chat_id=${TELEGRAM_CHAT_ID}&disable_notification=${STN_DISABLE_NOTIFICATION}\"" \
 					 2> /dev/null)"
 			if ( ! echo "${CURL_RESULT}" | grep -Fiq "\"ok\":true" ); then
 				if ( echo "${CURL_RESULT}" | grep -Fiq "\"error_code\":413," ); then
@@ -332,7 +324,7 @@ sendTelegramNotification ()
 					--insecure \
 					--max-time \""60\"" \
 					-F "\"video=@${STN_ATT_FULLFN}\"" \
-					 "\"https://api.telegram.org/bot${STN_TELEGRAM_BOT_ID}:${STN_TELEGRAM_BOT_APIKEY}/sendVideo?chat_id=${STN_TELEGRAM_CHAT_ID}&disable_notification=${STN_DISABLE_NOTIFICATION}\"" \
+					 "\"https://api.telegram.org/bot${TELEGRAM_BOT_ID}:${TELEGRAM_BOT_APIKEY}/sendVideo?chat_id=${TELEGRAM_CHAT_ID}&disable_notification=${STN_DISABLE_NOTIFICATION}\"" \
 					 2> /dev/null)"
 			if ( ! echo "${CURL_RESULT}" | grep -Fiq "\"ok\":true" ); then
 				if ( echo "${CURL_RESULT}" | grep -Fiq "\"error_code\":413," ); then
@@ -410,29 +402,26 @@ if [ -z "${FOLDER_TO_WATCH}" ]; then
 	exit 99
 fi
 #
-if [ -z "${INCIDENT_SEND_VIDEO_TO_CHAT}" ]; then
-	logAdd "[ERROR] Env var not set: INCIDENT_SEND_VIDEO_TO_CHAT. Stop."
-	exit 99
-fi
 #
-if [ -z "${STN_TELEGRAM_BOT_ID}" ] || [ -z "${STN_TELEGRAM_BOT_APIKEY}" ] || [ -z "${STN_TELEGRAM_CHAT_ID}" ]; then
+if [ -z "${TELEGRAM_BOT_ID}" ] || [ -z "${TELEGRAM_BOT_APIKEY}" ] || [ -z "${TELEGRAM_CHAT_ID}" ]; then
 	logAdd "[ERROR] Telegram bot config env vars missing. Stop."
 	exit 99
 fi
 #
-if [ "${#DVRSCAN_EXTRACT_MOTION_ROI_ARRAY[*]}" -eq 0 ]; then
-	logAdd "[ERROR] Env var array not set: DVRSCAN_EXTRACT_MOTION_ROI_ARRAY. Stop."
-	exit 99
-fi
+#if [ "${#DVRSCAN_EXTRACT_MOTION_ROI_ARRAY[*]}" -eq 0 ]; then
+	#logAdd "[ERROR] Env var array not set: DVRSCAN_EXTRACT_MOTION_ROI_ARRAY. Stop."
+	#exit 99
+#fi
 #
 # Runtime Variables.
 LOG_SUFFIX="$(echo "${FOLDER_TO_WATCH}" | sed -e "s/^.*\///")"
 LOGFILE="/tmp/${SCRIPT_NAME}_${LOG_SUFFIX}.log"
 #
-DVRSCAN_EXTRACT_MOTION_ROI="-roi"
-for roi in "${DVRSCAN_EXTRACT_MOTION_ROI_ARRAY[@]}"; do
-	DVRSCAN_EXTRACT_MOTION_ROI="${DVRSCAN_EXTRACT_MOTION_ROI} ${roi}"
-done
+DVRSCAN_EXTRACT_MOTION_ROI=""
+#DVRSCAN_EXTRACT_MOTION_ROI="-roi"
+#for roi in "${DVRSCAN_EXTRACT_MOTION_ROI_ARRAY[@]}"; do
+	#DVRSCAN_EXTRACT_MOTION_ROI="${DVRSCAN_EXTRACT_MOTION_ROI} ${roi}"
+#done
 logAdd "[INFO] DVRSCAN_EXTRACT_MOTION_ROI=[${DVRSCAN_EXTRACT_MOTION_ROI}]"
 #
 # set +m
@@ -440,19 +429,14 @@ trap "" SIGHUP
 trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
 #
 # Check if "dvr-scan" is available
-if [ "${DVRSCAN_MOTION_ANALYSIS}" = "1" ]; then
-	if ( ! "${DVRSCAN_PYTHON}" "${DVRSCAN_SCRIPT}" --version > /dev/null 2>&1 ); then
-		logAdd "[WARN] dvr-scan is not installed correctly. Setting DVRSCAN_MOTION_ANALYSIS=0."
-		DVRSCAN_MOTION_ANALYSIS="0"
-	fi
+if ( ! "${DVRSCAN_PYTHON}" "${DVRSCAN_SCRIPT}" --version > /dev/null 2>&1 ); then
+	logAdd "[WARN] dvr-scan is not installed correctly. Setting DVRSCAN_MOTION_ANALYSIS=0."
+	DVRSCAN_MOTION_ANALYSIS="0"
 fi
 #
 # Check if "ffmpeg" is available
-if [ "${FFMPEG_EXTRACT_JPG}" = "1" ]; then
-	if ( ! ffmpeg -version > /dev/null 2>&1 ); then
-		logAdd "[WARN] ffmpeg is not installed correctly. Install it with 'apt-get install -y ffmpeg'. Setting FFMPEG_EXTRACT_JPG=0 to disable the feature."
-		FFMPEG_EXTRACT_JPG="0"
-	fi
+if ( ! ffmpeg -version > /dev/null 2>&1 ); then
+	logAdd "[WARN] ffmpeg is not installed correctly."
 fi
 #
 # Check if "mediainfo" is available
